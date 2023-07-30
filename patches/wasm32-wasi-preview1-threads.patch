@@ -1,0 +1,507 @@
+diff --git a/compiler/rustc_target/src/spec/mod.rs b/compiler/rustc_target/src/spec/mod.rs
+index 7114c243ea1..a4a9c0aa0dd 100644
+--- a/compiler/rustc_target/src/spec/mod.rs
++++ b/compiler/rustc_target/src/spec/mod.rs
+@@ -1403,6 +1403,7 @@ fn $module() {
+     ("wasm32-unknown-emscripten", wasm32_unknown_emscripten),
+     ("wasm32-unknown-unknown", wasm32_unknown_unknown),
+     ("wasm32-wasi", wasm32_wasi),
++    ("wasm32-wasi-preview1-threads", wasm32_wasi_preview1_threads),
+     ("wasm64-unknown-unknown", wasm64_unknown_unknown),
+
+     ("thumbv6m-none-eabi", thumbv6m_none_eabi),
+diff --git a/compiler/rustc_target/src/spec/wasm32_wasi_preview1_threads.rs b/compiler/rustc_target/src/spec/wasm32_wasi_preview1_threads.rs
+new file mode 100644
+index 00000000000..c567155fee6
+--- /dev/null
++++ b/compiler/rustc_target/src/spec/wasm32_wasi_preview1_threads.rs
+@@ -0,0 +1,134 @@
++//! The `wasm32-wasi-preview1-threads` target is a new and still (as of July 2023) an
++//! experimental target. The definition in this file is likely to be tweaked
++//! over time and shouldn't be relied on too much.
++//!
++//! The `wasi-threads` target is a proposal to define a standardized set of syscalls
++//! that WebAssembly files can interoperate with. This set of syscalls is
++//! intended to empower WebAssembly binaries with native capabilities such as
++//! threads, filesystem access, network access, etc.
++//!
++//! You can see more about the proposal at <https://github.com/WebAssembly/wasi-threads>.
++//!
++//! The Rust target definition here is interesting in a few ways. We want to
++//! serve two use cases here with this target:
++//!
++//! * First, we want Rust usage of the target to be as hassle-free as possible,
++//!   ideally avoiding the need to configure and install a local wasm32-wasi-preview1-threads
++//!   toolchain.
++//!
++//! * Second, one of the primary use cases of LLVM's new wasm backend and the
++//!   wasm support in LLD is that any compiled language can interoperate with
++//!   any other. To that the `wasm32-wasi-preview1-threads` target is the first with a viable C
++//!   standard library and sysroot common definition, so we want Rust and C/C++
++//!   code to interoperate when compiled to `wasm32-unknown-unknown`.
++//!
++//! You'll note, however, that the two goals above are somewhat at odds with one
++//! another. To attempt to solve both use cases in one go we define a target
++//! that (ab)uses the `crt-static` target feature to indicate which one you're
++//! in.
++//!
++//! ## No interop with C required
++//!
++//! By default the `crt-static` target feature is enabled, and when enabled
++//! this means that the bundled version of `libc.a` found in `liblibc.rlib`
++//! is used. This isn't intended really for interoperation with a C because it
++//! may be the case that Rust's bundled C library is incompatible with a
++//! foreign-compiled C library. In this use case, though, we use `rust-lld` and
++//! some copied crt startup object files to ensure that you can download the
++//! wasi target for Rust and you're off to the races, no further configuration
++//! necessary.
++//!
++//! All in all, by default, no external dependencies are required. You can
++//! compile `wasm32-wasi-preview1-threads` binaries straight out of the box. You can't, however,
++//! reliably interoperate with C code in this mode (yet).
++//!
++//! ## Interop with C required
++//!
++//! For the second goal we repurpose the `target-feature` flag, meaning that
++//! you'll need to do a few things to have C/Rust code interoperate.
++//!
++//! 1. All Rust code needs to be compiled with `-C target-feature=-crt-static`,
++//!    indicating that the bundled C standard library in the Rust sysroot will
++//!    not be used.
++//!
++//! 2. If you're using rustc to build a linked artifact then you'll need to
++//!    specify `-C linker` to a `clang` binary that supports
++//!    `wasm32-wasi-preview1-threads` and is configured with the `wasm32-wasi-preview1-threads` sysroot. This
++//!    will cause Rust code to be linked against the libc.a that the specified
++//!    `clang` provides.
++//!
++//! 3. If you're building a staticlib and integrating Rust code elsewhere, then
++//!    compiling with `-C target-feature=-crt-static` is all you need to do.
++//!
++//! You can configure the linker via Cargo using the
++//! `CARGO_TARGET_WASM32_WASI_LINKER` env var. Be sure to also set
++//! `CC_wasm32-wasi-preview1-threads` if any crates in the dependency graph are using the `cc`
++//! crate.
++//!
++//! ## Remember, this is all in flux
++//!
++//! The wasi target is **very** new in its specification. It's likely going to
++//! be a long effort to get it standardized and stable. We'll be following it as
++//! best we can with this target. Don't start relying on too much here unless
++//! you know what you're getting in to!
++
++use super::crt_objects::{self, LinkSelfContainedDefault};
++use super::{wasm_base, Cc, LinkerFlavor, Target};
++
++pub fn target() -> Target {
++    let mut options = wasm_base::options();
++
++    options.os = "wasi".into();
++
++    options.add_pre_link_args(
++        LinkerFlavor::WasmLld(Cc::No),
++        &["--import-memory", "--export-memory", "--shared-memory"],
++    );
++    options.add_pre_link_args(
++        LinkerFlavor::WasmLld(Cc::Yes),
++        &[
++            "--target=wasm32-wasi-threads",
++            "-Wl,--import-memory",
++            "-Wl,--export-memory,",
++            "-Wl,--shared-memory",
++        ],
++    );
++
++    options.pre_link_objects_self_contained = crt_objects::pre_wasi_self_contained();
++    options.post_link_objects_self_contained = crt_objects::post_wasi_self_contained();
++
++    // FIXME: Figure out cases in which WASM needs to link with a native toolchain.
++    options.link_self_contained = LinkSelfContainedDefault::True;
++
++    // Right now this is a bit of a workaround but we're currently saying that
++    // the target by default has a static crt which we're taking as a signal
++    // for "use the bundled crt". If that's turned off then the system's crt
++    // will be used, but this means that default usage of this target doesn't
++    // need an external compiler but it's still interoperable with an external
++    // compiler if configured correctly.
++    options.crt_static_default = true;
++    options.crt_static_respected = true;
++
++    // Allow `+crt-static` to create a "cdylib" output which is just a wasm file
++    // without a main function.
++    options.crt_static_allows_dylibs = true;
++
++    // WASI's `sys::args::init` function ignores its arguments; instead,
++    // `args::args()` makes the WASI API calls itself.
++    options.main_needs_argc_argv = false;
++
++    // And, WASI mangles the name of "main" to distinguish between different
++    // signatures.
++    options.entry_name = "__main_void".into();
++
++    options.singlethread = false;
++    options.features = "+atomics,+bulk-memory,+mutable-globals".into();
++
++    Target {
++        llvm_target: "wasm32-wasi".into(),
++        pointer_width: 32,
++        data_layout: "e-m:e-p:32:32-p10:8:8-p20:8:8-i64:64-n32:64-S128-ni:1:10:20".into(),
++        arch: "wasm32".into(),
++        options,
++    }
++}
+diff --git a/library/std/Cargo.toml b/library/std/Cargo.toml
+index c47f910dadf..ddcd35b1ac7 100644
+--- a/library/std/Cargo.toml
++++ b/library/std/Cargo.toml
+@@ -47,7 +47,7 @@ fortanix-sgx-abi = { version = "0.5.0", features = ['rustc-dep-of-std'], public
+ [target.'cfg(target_os = "hermit")'.dependencies]
+ hermit-abi = { version = "0.3.2", features = ['rustc-dep-of-std'], public = true }
+
+-[target.wasm32-wasi.dependencies]
++[target.'cfg(target_os = "wasi")'.dependencies]
+ wasi = { version = "0.11.0", features = ['rustc-dep-of-std'], default-features = false }
+
+ [features]
+diff --git a/library/std/src/sys/wasi/mod.rs b/library/std/src/sys/wasi/mod.rs
+index a2223708024..98517da1d0f 100644
+--- a/library/std/src/sys/wasi/mod.rs
++++ b/library/std/src/sys/wasi/mod.rs
+@@ -29,8 +29,7 @@
+ #[path = "../wasm/atomics/futex.rs"]
+ pub mod futex;
+ pub mod io;
+-#[path = "../unsupported/locks/mod.rs"]
+-pub mod locks;
++
+ pub mod net;
+ pub mod os;
+ #[path = "../unix/os_str.rs"]
+@@ -47,14 +46,27 @@
+ pub mod thread_local_dtor;
+ #[path = "../unsupported/thread_local_key.rs"]
+ pub mod thread_local_key;
+-#[path = "../unsupported/thread_parking.rs"]
+-pub mod thread_parking;
+ pub mod time;
+
+ cfg_if::cfg_if! {
+-    if #[cfg(not(target_feature = "atomics"))] {
++    if #[cfg(target_feature = "atomics")] {
++        #[path = "../unix/locks"]
++        pub mod locks {
++            #![allow(unsafe_op_in_unsafe_fn)]
++            mod futex_condvar;
++            mod futex_mutex;
++            mod futex_rwlock;
++            pub(crate) use futex_condvar::Condvar;
++            pub(crate) use futex_mutex::Mutex;
++            pub(crate) use futex_rwlock::RwLock;
++        }
++    } else {
++        #[path = "../unsupported/locks/mod.rs"]
++        pub mod locks;
+         #[path = "../unsupported/once.rs"]
+         pub mod once;
++        #[path = "../unsupported/thread_parking.rs"]
++        pub mod thread_parking;
+     }
+ }
+
+diff --git a/library/std/src/sys/wasi/os.rs b/library/std/src/sys/wasi/os.rs
+index 9919dc7087e..197bdeda4fb 100644
+--- a/library/std/src/sys/wasi/os.rs
++++ b/library/std/src/sys/wasi/os.rs
+@@ -224,6 +224,11 @@ pub fn unsetenv(n: &OsStr) -> io::Result<()> {
+     })
+ }
+
++#[allow(dead_code)]
++pub fn page_size() -> usize {
++    unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize }
++}
++
+ pub fn temp_dir() -> PathBuf {
+     panic!("no filesystem on wasm")
+ }
+diff --git a/library/std/src/sys/wasi/thread.rs b/library/std/src/sys/wasi/thread.rs
+index e7a6ab4be82..d27b7a2e0f5 100644
+--- a/library/std/src/sys/wasi/thread.rs
++++ b/library/std/src/sys/wasi/thread.rs
+@@ -1,5 +1,3 @@
+-#![deny(unsafe_op_in_unsafe_fn)]
+-
+ use crate::ffi::CStr;
+ use crate::io;
+ use crate::mem;
+@@ -7,14 +5,116 @@
+ use crate::sys::unsupported;
+ use crate::time::Duration;
+
+-pub struct Thread(!);
++cfg_if::cfg_if! {
++    if #[cfg(target_feature = "atomics")] {
++        use crate::cmp;
++        use crate::ptr;
++        use crate::sys::os;
++        // Add a few symbols not in upstream `libc` just yet.
++        mod libc {
++            pub use crate::ffi;
++            pub use crate::mem;
++            pub use libc::*;
++
++            // defined in wasi-libc
++            // https://github.com/WebAssembly/wasi-libc/blob/a6f871343313220b76009827ed0153586361c0d5/libc-top-half/musl/include/alltypes.h.in#L108
++            #[repr(C)]
++            union pthread_attr_union {
++                __i: [ffi::c_int; if mem::size_of::<ffi::c_int>() == 8 { 14 } else { 9 }],
++                __vi: [ffi::c_int; if mem::size_of::<ffi::c_int>() == 8 { 14 } else { 9 }],
++                __s: [ffi::c_ulong; if mem::size_of::<ffi::c_int>() == 8 { 7 } else { 9 }],
++            }
++
++            #[repr(C)]
++            pub struct pthread_attr_t {
++                __u: pthread_attr_union,
++            }
++
++            #[allow(non_camel_case_types)]
++            pub type pthread_t = *mut ffi::c_void;
++
++            extern "C" {
++                pub fn pthread_create(
++                    native: *mut pthread_t,
++                    attr: *const pthread_attr_t,
++                    f: extern "C" fn(*mut ffi::c_void) -> *mut ffi::c_void,
++                    value: *mut ffi::c_void,
++                ) -> ffi::c_int;
++                pub fn pthread_join(native: pthread_t, value: *mut *mut ffi::c_void) -> ffi::c_int;
++                pub fn pthread_attr_init(attrp: *mut pthread_attr_t) -> ffi::c_int;
++                pub fn pthread_attr_setstacksize(
++                    attr: *mut pthread_attr_t,
++                    stack_size: libc::size_t,
++                ) -> ffi::c_int;
++                pub fn pthread_attr_destroy(attr: *mut pthread_attr_t) -> ffi::c_int;
++            }
++        }
++
++        pub struct Thread {
++            id: libc::pthread_t,
++        }
++    } else {
++        pub struct Thread(!);
++    }
++}
+
+ pub const DEFAULT_MIN_STACK_SIZE: usize = 4096;
+
+ impl Thread {
+     // unsafe: see thread::Builder::spawn_unchecked for safety requirements
+-    pub unsafe fn new(_stack: usize, _p: Box<dyn FnOnce()>) -> io::Result<Thread> {
+-        unsupported()
++    cfg_if::cfg_if! {
++        if #[cfg(target_feature = "atomics")] {
++            pub unsafe fn new(stack: usize, p: Box<dyn FnOnce()>) -> io::Result<Thread> {
++                let p = Box::into_raw(Box::new(p));
++                let mut native: libc::pthread_t = mem::zeroed();
++                let mut attr: libc::pthread_attr_t = mem::zeroed();
++                assert_eq!(libc::pthread_attr_init(&mut attr), 0);
++
++                let stack_size = cmp::max(stack, DEFAULT_MIN_STACK_SIZE);
++
++                match libc::pthread_attr_setstacksize(&mut attr, stack_size) {
++                    0 => {}
++                    n => {
++                        assert_eq!(n, libc::EINVAL);
++                        // EINVAL means |stack_size| is either too small or not a
++                        // multiple of the system page size. Because it's definitely
++                        // >= PTHREAD_STACK_MIN, it must be an alignment issue.
++                        // Round up to the nearest page and try again.
++                        let page_size = os::page_size();
++                        let stack_size =
++                            (stack_size + page_size - 1) & (-(page_size as isize - 1) as usize - 1);
++                        assert_eq!(libc::pthread_attr_setstacksize(&mut attr, stack_size), 0);
++                    }
++                };
++
++                let ret = libc::pthread_create(&mut native, &attr, thread_start, p as *mut _);
++                // Note: if the thread creation fails and this assert fails, then p will
++                // be leaked. However, an alternative design could cause double-free
++                // which is clearly worse.
++                assert_eq!(libc::pthread_attr_destroy(&mut attr), 0);
++
++                return if ret != 0 {
++                    // The thread failed to start and as a result p was not consumed. Therefore, it is
++                    // safe to reconstruct the box so that it gets deallocated.
++                    drop(Box::from_raw(p));
++                    Err(io::Error::from_raw_os_error(ret))
++                } else {
++                    Ok(Thread { id: native })
++                };
++
++                extern "C" fn thread_start(main: *mut libc::c_void) -> *mut libc::c_void {
++                    unsafe {
++                        // Finally, let's run some code.
++                        Box::from_raw(main as *mut Box<dyn FnOnce()>)();
++                    }
++                    ptr::null_mut()
++                }
++            }
++        } else {
++            pub unsafe fn new(_stack: usize, _p: Box<dyn FnOnce()>) -> io::Result<Thread> {
++                unsupported()
++            }
++        }
+     }
+
+     pub fn yield_now() {
+@@ -62,7 +162,19 @@ pub fn sleep(dur: Duration) {
+     }
+
+     pub fn join(self) {
+-        self.0
++        cfg_if::cfg_if! {
++            if #[cfg(target_feature = "atomics")] {
++                unsafe {
++                    let ret = libc::pthread_join(self.id, ptr::null_mut());
++                    mem::forget(self);
++                    if ret != 0 {
++                        rtabort!("failed to join thread: {}", io::Error::from_raw_os_error(ret));
++                    }
++                }
++            } else {
++                self.0
++            }
++        }
+     }
+ }
+
+diff --git a/src/bootstrap/compile.rs b/src/bootstrap/compile.rs
+index 400b07b1882..7a4abcd1dc0 100644
+--- a/src/bootstrap/compile.rs
++++ b/src/bootstrap/compile.rs
+@@ -287,13 +287,14 @@ fn copy_self_contained_objects(
+             let libunwind_path = copy_llvm_libunwind(builder, target, &libdir_self_contained);
+             target_deps.push((libunwind_path, DependencyType::TargetSelfContained));
+         }
+-    } else if target.ends_with("-wasi") {
++    } else if target.contains("-wasi") {
+         let srcdir = builder
+             .wasi_root(target)
+             .unwrap_or_else(|| {
+                 panic!("Target {:?} does not have a \"wasi-root\" key", target.triple)
+             })
+-            .join("lib/wasm32-wasi");
++            .join("lib")
++            .join(target.to_string().replace("-preview1", ""));
+         for &obj in &["libc.a", "crt1-command.o", "crt1-reactor.o"] {
+             copy_and_stamp(
+                 builder,
+@@ -393,9 +394,13 @@ pub fn std_cargo(builder: &Builder<'_>, target: TargetSelection, stage: u32, car
+             }
+         }
+
+-        if target.ends_with("-wasi") {
++        if target.contains("-wasi") {
+             if let Some(p) = builder.wasi_root(target) {
+-                let root = format!("native={}/lib/wasm32-wasi", p.to_str().unwrap());
++                let root = format!(
++                    "native={}/lib/{}",
++                    p.to_str().unwrap(),
++                    target.to_string().replace("-preview1", "")
++                );
+                 cargo.rustflag("-L").rustflag(&root);
+             }
+         }
+diff --git a/src/ci/docker/host-x86_64/dist-various-2/Dockerfile b/src/ci/docker/host-x86_64/dist-various-2/Dockerfile
+index dd1c5fced0e..9bc074237e6 100644
+--- a/src/ci/docker/host-x86_64/dist-various-2/Dockerfile
++++ b/src/ci/docker/host-x86_64/dist-various-2/Dockerfile
+@@ -93,6 +93,9 @@ RUN /tmp/build-x86_64-fortanix-unknown-sgx-toolchain.sh
+ COPY host-x86_64/dist-various-2/build-wasi-toolchain.sh /tmp/
+ RUN /tmp/build-wasi-toolchain.sh
+
++COPY host-x86_64/dist-various-2/build-wasi-threads-toolchain.sh /tmp/
++RUN /tmp/build-wasi-threads-toolchain.sh
++
+ COPY scripts/freebsd-toolchain.sh /tmp/
+ RUN /tmp/freebsd-toolchain.sh i686
+
+@@ -114,6 +117,7 @@ ENV TARGETS=x86_64-unknown-fuchsia
+ ENV TARGETS=$TARGETS,aarch64-unknown-fuchsia
+ ENV TARGETS=$TARGETS,wasm32-unknown-unknown
+ ENV TARGETS=$TARGETS,wasm32-wasi
++ENV TARGETS=$TARGETS,wasm32-wasi-preview1-threads
+ ENV TARGETS=$TARGETS,sparcv9-sun-solaris
+ ENV TARGETS=$TARGETS,x86_64-pc-solaris
+ ENV TARGETS=$TARGETS,x86_64-sun-solaris
+@@ -136,6 +140,7 @@ RUN ln -s /usr/include/asm-generic /usr/local/include/asm
+
+ ENV RUST_CONFIGURE_ARGS --enable-extended --enable-lld --disable-docs \
+   --set target.wasm32-wasi.wasi-root=/wasm32-wasi \
++  --set target.wasm32-wasi-preview1-threads.wasi-root=/wasm32-wasi-preview1-threads \
+   --musl-root-armv7=/musl-armv7
+
+ ENV SCRIPT python3 ../x.py dist --host='' --target $TARGETS
+
+diff --git a/src/tools/build-manifest/src/main.rs b/src/tools/build-manifest/src/main.rs
+index a02ce68903d..88f8770029e 100644
+--- a/src/tools/build-manifest/src/main.rs
++++ b/src/tools/build-manifest/src/main.rs
+@@ -139,6 +139,7 @@
+     "wasm32-unknown-emscripten",
+     "wasm32-unknown-unknown",
+     "wasm32-wasi",
++    "wasm32-wasi-preview1-threads",
+     "x86_64-apple-darwin",
+     "x86_64-apple-ios",
+     "x86_64-fortanix-unknown-sgx",
+diff --git a/tests/assembly/stack-protector/stack-protector-target-support.rs b/tests/assembly/stack-protector/stack-protector-target-support.rs
+index d5b48105ef2..e5cbace80b1 100644
+--- a/tests/assembly/stack-protector/stack-protector-target-support.rs
++++ b/tests/assembly/stack-protector/stack-protector-target-support.rs
+@@ -152,28 +152,30 @@
+ // [r72] needs-llvm-components: webassembly
+ // [r73] compile-flags:--target wasm32-wasi
+ // [r73] needs-llvm-components: webassembly
+-// [r74] compile-flags:--target x86_64-apple-ios
+-// [r74] needs-llvm-components: x86
+-// [r75] compile-flags:--target x86_64-fortanix-unknown-sgx
++// [r74] compile-flags:--target wasm32-wasi-preview1-threads
++// [r74] needs-llvm-components: webassembly
++// [r75] compile-flags:--target x86_64-apple-ios
+ // [r75] needs-llvm-components: x86
+-// [r76] compile-flags:--target x86_64-unknown-fuchsia
++// [r76] compile-flags:--target x86_64-fortanix-unknown-sgx
+ // [r76] needs-llvm-components: x86
+-// [r77] compile-flags:--target x86_64-linux-android
++// [r77] compile-flags:--target x86_64-unknown-fuchsia
+ // [r77] needs-llvm-components: x86
+-// [r78] compile-flags:--target x86_64-sun-solaris
++// [r78] compile-flags:--target x86_64-linux-android
+ // [r78] needs-llvm-components: x86
+-// [r79] compile-flags:--target x86_64-unknown-freebsd
++// [r79] compile-flags:--target x86_64-sun-solaris
+ // [r79] needs-llvm-components: x86
+-// [r80] compile-flags:--target x86_64-unknown-illumos
++// [r80] compile-flags:--target x86_64-unknown-freebsd
+ // [r80] needs-llvm-components: x86
+-// [r81] compile-flags:--target x86_64-unknown-linux-gnux32
++// [r81] compile-flags:--target x86_64-unknown-illumos
+ // [r81] needs-llvm-components: x86
+-// [r82] compile-flags:--target x86_64-unknown-linux-musl
++// [r82] compile-flags:--target x86_64-unknown-linux-gnux32
+ // [r82] needs-llvm-components: x86
+-// [r83] compile-flags:--target x86_64-unknown-netbsd
++// [r83] compile-flags:--target x86_64-unknown-linux-musl
+ // [r83] needs-llvm-components: x86
+-// [r84] compile-flags: --target x86_64-unknown-redox
++// [r84] compile-flags:--target x86_64-unknown-netbsd
+ // [r84] needs-llvm-components: x86
++// [r85] compile-flags: --target x86_64-unknown-redox
++// [r85] needs-llvm-components: x86
+ // compile-flags: -Z stack-protector=all
+ // compile-flags: -C opt-level=2
+
+--
+2.37.0
+

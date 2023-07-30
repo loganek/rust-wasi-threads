@@ -1,0 +1,13 @@
+FROM loganek/rust-stable-wasm32-wasi-preview1-threads-base:latest as base
+
+WORKDIR ${RUST_DIR}
+
+COPY wasm32-wasi-preview1-threads.patch .
+
+RUN patch -p1 < wasm32-wasi-preview1-threads.patch && \
+    ./x.py build --stage 1 --target wasm32-wasi-preview1-threads && \
+    /root/.cargo/bin/rustup toolchain link custom /rust/build/host/stage1 && \
+    /root/.cargo/bin/rustup default custom
+
+WORKDIR /app
+CMD ["/root/.cargo/bin/cargo", "build", "--target", "wasm32-wasi-preview1-threads"]

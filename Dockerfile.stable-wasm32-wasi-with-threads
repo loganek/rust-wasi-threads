@@ -1,0 +1,17 @@
+FROM loganek/rust-stable-wasm32-wasi-with-threads-base:latest as base
+
+RUN cd ${WASI_SDK_DIR}/share/wasi-sysroot/lib/ && \
+    rm -rf wasm32-wasi && \
+    mv wasm32-wasi-threads wasm32-wasi
+
+WORKDIR ${RUST_DIR}
+
+ENV RUSTFLAGS="-C target-feature=+atomics,+bulk-memory,+mutable-globals"
+COPY wasi-locks.patch .
+RUN patch -p1 < wasi-locks.patch && \
+    RUST_BACKTRACE=1 RUSTFLAGS="${RUSTFLAGS}" ./x.py build --stage 1 --target wasm32-wasi && \
+    /root/.cargo/bin/rustup toolchain link custom /rust/build/host/stage1 && \
+    /root/.cargo/bin/rustup default custom
+
+WORKDIR /app
+CMD ["/root/.cargo/bin/cargo", "build", "--target", "wasm32-wasi"]
