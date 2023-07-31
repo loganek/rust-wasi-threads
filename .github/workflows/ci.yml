@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - "*"
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        build_type: [
+            stable-wasm32-wasi-with-threads,
+            stable-wasm32-wasi-preview1-threads,
+            # nightly-wasm32-wasi-preview1-threads,
+          ]
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v3
+
+      - name: Checkout WAMR code
+        uses: actions/checkout@v3
+        with:
+          repository: bytecodealliance/wasm-micro-runtime
+          path: wamr
+
+      - name: Build WAMR
+        run: |
+          sudo apt update && sudo apt install -y cmake
+          cd wamr/product-mini/platforms/linux
+          mkdir build
+          cd build
+          cmake -DWAMR_BUILD_LIB_WASI_THREADS=1 ..
+          cmake --build . --parallel 4
+
+      - name: Build base Docker image for ${{ matrix.build_type }}
+        run: |
+          docker build \
+            -t loganek/rust-${{ matrix.build_type }}-base:latest \
+            -f Dockerfile.base \
+            patches
+
+      - name: Build final Docker image for ${{ matrix.build_type }}
+        run: |
+          docker build \
+            -t loganek/rust-${{ matrix.build_type }}:latest \
+            -f Dockerfile.${{ matrix.build_type }} \
+            patches
+
+      - name: Build tests
+        run: |
+          docker run \
+            -v ${{ github.workspace }}/tests/simple:/app \
+            loganek/rust-${{ matrix.build_type }}:latest
+
+      - name: Run tests
+        run: |
+          cp tests/simple/target/wasm32-wasi*/debug/simple.wasm .
+          ./wamr/product-mini/platforms/linux/build/iwasm simple.wasm
