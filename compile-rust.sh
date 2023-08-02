@@ -41,15 +41,13 @@ case "$BUILD_TYPE" in
 "stable-wasm32-wasi-preview1-threads")
     ;;
 "nightly-wasm32-wasi-preview1-threads")
-    RUST_REPO_URL=https://github.com/g0djan/rust.git
-    RUST_REPO_BRANCH=godjan/wasi-threads
+    RUST_REPO_BRANCH=master
     ;;
 esac
 
 docker build \
     -t $DOCKER_TAG-base:latest \
     -f Dockerfile.base \
-    --build-arg RUST_REPO_URL=$RUST_REPO_URL \
     --build-arg RUST_REPO_BRANCH=$RUST_REPO_BRANCH \
     patches
 docker build -t $DOCKER_TAG:latest -f $DOCKER_FILE patches

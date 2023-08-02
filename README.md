@@ -22,5 +22,5 @@ The script takes two parameters:
 * BUILD_TYPE - it describes a variant of the Rust toolchain. Currently, there are three variants supported:
   * `stable-wasm32-wasi-with-threads` - a stable branch of the Rust compiler is used; the threading support is by pointing the `wasm32-wasi` target to use `wasm32-wasi-threads` WASI libc target, and compiling Rust's standard library with the following target features: `+atomics,+bulk-memory,+mutable-globals`. The [wasi-locks](./patches/wasi-locks.patch) patch is applied
   * `stable-wasm32-wasi-preview1-threads` -  a stable branch of the Rust compiler is used; the threading is exposed in the `wasm32-wasi-preview1-threads` target by applying the [wasm32-wasi-preview1-threads](./patches/wasm32-wasi-preview1-threads.patch) patch.
-  * `nightly-wasm32-wasi-preview1-threads` -  a [g0djan:godjan/wasi-threads](https://github.com/g0djan/rust/tree/godjan/wasi-threads) branch of the Rust compiler is used; the threading is exposed in the `wasm32-wasi-preview1-threads`. No patches are required
+  * `nightly-wasm32-wasi-preview1-threads` -  a master branch of the Rust compiler is used; the threading is exposed in the `wasm32-wasi-preview1-threads`. No patches are required
 * CRATE_PATH - a path to a crate to compile using the toolchain

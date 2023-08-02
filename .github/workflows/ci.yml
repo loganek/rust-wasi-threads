@@ -16,7 +16,7 @@ jobs:
         build_type: [
             stable-wasm32-wasi-with-threads,
             stable-wasm32-wasi-preview1-threads,
-            # nightly-wasm32-wasi-preview1-threads,
+            nightly-wasm32-wasi-preview1-threads,
           ]
     steps:
       - name: Check out repository code
